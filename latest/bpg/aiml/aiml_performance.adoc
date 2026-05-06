@@ -117,6 +117,16 @@ SOCI parallel pull mode uses a dual-threshold control system with configurable p
 * For a hands-on example with Karpenter on Amazon EKS, see the https://github.com/aws-samples/karpenter-blueprints/tree/main/blueprints/soci-snapshotter[Karpenter Blueprint using SOCI snapshotter parallel pull/unpack mode].
 * For information on configuring Bottlerocket for parallel pull, see https://bottlerocket.dev/en/os/1.44.x/api/settings/container-runtime-plugins/#tag-soci-parallel-pull-configuration[soci-snapshotter Parallel Pull Unpack Mode] in the Bottlerocket Documentation.
 
+===  Optimize Network Bandwidth for Image Pulls
+
+When pulling large container images, the network bandwidth available to your EKS worker nodes directly impacts time-to-start for training and inference workloads. All current-generation Nitro-based instances use the Elastic Network Adapter (ENA), but available bandwidth varies significantly by instance size, and it's critical to understand the difference between baseline and burst bandwidth (see https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-network-bandwidth.html[Amazon EC2 instance network bandwidth]). To minimize time-to-ready for your workloads, select instance sizes with sufficient baseline network bandwidth relative to your image sizes and pull concurrency.
+
+=== Reduce Image Pull Latency
+
+For EKS clusters running in private subnets, configure VPC interface endpoints for Amazon ECR to keep image pull traffic on the AWS private network, reducing latency and eliminating NAT gateway data processing charges. See https://docs.aws.amazon.com/AmazonECR/latest/userguide/vpc-endpoints.html[Create the VPC endpoints for Amazon ECR] for setup instructions.
+
+Additionally, if your workloads rely on upstream container images from external registries, consider using https://docs.aws.amazon.com/AmazonECR/latest/userguide/pull-through-cache.html[ECR pull through cache] to proxy and cache those images in your private ECR registry.
+
 == Reducing Container Image Sizes
 
 Reducing the size of container images during startup is another way to make images smaller. You can make reductions at every step of the container image build process. To start, choose base images that contain the least number of dependencies required. During image builds, include only the essential libraries and artifacts that are required. When building images, try combining multiple RUN or COPY commands to create a smaller number of larger layers.
