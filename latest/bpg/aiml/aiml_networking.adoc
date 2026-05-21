@@ -16,29 +16,27 @@ TIP: https://aws-experience.com/emea/smb/events/series/get-hands-on-with-amazon-
 
 For distributed training workloads on Amazon EKS with high inter-node communication demands, consider selecting instances with higher network bandwidth or https://docs.aws.amazon.com/eks/latest/userguide/node-efa.html[Elastic Fabric Adapter] (EFA). Insufficient network performance can bottleneck data transfer, slowing down machine learning tasks like distributed multi-GPU training. Note that inference workloads don't typically have high inter-node communication.
 
-**Example**
-
-For example, using Karpenter:
-
-[,yaml]
-----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: ml-workload
-spec:
-  nodeSelector:
-    karpenter.k8s.aws/instance-network-bandwidth: "100000"  # 100 Gbps in Mbps
-    node.kubernetes.io/instance-type: p5.48xlarge  # EFA-enabled instance
-  containers:
-  - name: training-job
-    image: `763104351884.dkr.ecr.us-west-2.amazonaws.com/pytorch-inference:2.6.0-gpu-py312-cu124-ubuntu22.04-ec2-v1.6`
-    resources:
-      limits:
-        vpc.amazonaws.com/efa: 1  # Requires EFA device plugin
-----
-
 Ensure tools like MPI and NCCL are installed in your container image to leverage EFA for training jobs.
+
+=== Configure node provisioning for EFA workloads
+
+When provisioning EFA-capable nodes for distributed training, ensure nodes land in a https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/placement-groups.html[cluster placement group] within a single Availability Zone. Placement groups provide the lowest-latency network topology between instances by co-locating them on the same physical infrastructure. These requirements apply regardless of whether you use Karpenter, managed node groups, or self-managed node groups. The following example uses Karpenter to illustrate the key configuration points.
+
+**Considerations**
+
+* **Pin to a single AZ**. Use `topology.kubernetes.io/zone` in NodePool requirements. EFA requires all communicating nodes to be in the same AZ — Karpenter must not spread training nodes across zones.
+* **Configure the cluster placement group**. Specify the placement group in the EC2NodeClass. Karpenter provisions into it automatically. For https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-blocks.html[Capacity Blocks for ML], placement is handled automatically via UltraClusters — no manual placement group is needed.
+* **Prevent disruption of multi-node training jobs**. Use PDBs or `karpenter.sh/do-not-disrupt: "true"` annotations on training pods. Without this, Karpenter's consolidation may attempt to replace or move EFA workloads mid-job, disrupting the entire distributed training run. Set `consolidationPolicy: WhenEmpty` on the NodePool to prevent consolidation of occupied nodes. (Note: Review the behaviour of these labels together with `terminationGracePeriod` and `expireAfter`labels https://karpenter.sh/docs/concepts/disruption/[here])
+* **Set appropriate expiration**. Configure `expireAfter` on the NodePool to a value longer than your longest training job, or disable it for training NodePools entirely. A node expiring mid-training terminates the job.
+* **Use the correct EFA device plugin version**. The https://github.com/aws/eks-charts/tree/master/stable/aws-efa-k8s-device-plugin[EFA device plugin] exposes `vpc.amazonaws.com/efa` as a schedulable resource.
+* **Configure security groups**. All EFA instances must be in the same security group with a self-referencing rule allowing ALL traffic to/from itself. Without this, EFA traffic fails silently.
+
+
+=== Understand Spot instance risks with EFA placement groups
+
+Amazon EC2 Spot Instances offer significant cost savings for training workloads (see https://github.com/aws/aws-eks-best-practices/blob/mainline/latest/bpg/aiml/aiml_compute.adoc#consider-using-amazon-ec2-spot-instances-for-gpus-with-karpenter[this section] for general Spot best practices with GPUs). However, using Spot within cluster placement groups introduces *correlated interruption risk*. Because placement groups co-locate instances on the same physical infrastructure, a capacity reclamation event often affects multiple instances simultaneously — potentially interrupting your entire multi-node training job at once rather than a single node. Since EFA workloads require a placement group, this risk is inherent to any EFA-based distributed training setup.
+
+This is fundamentally different from Spot usage without placement groups, where nodes can be spread across AZs and interruptions are independent. With a placement group, all nodes are in a single AZ on shared infrastructure, so a single capacity event can cascade.
 
 == Planning for IP Address Consumption on Large GPU Instances
 
@@ -46,6 +44,16 @@ By default, the Amazon VPC CNI plugin pre-allocates IP addresses to ensure pods 
 
 This mismatch is common in training and inference workloads where pod density per node is low. At cluster scale, especially during autoscaling events that spin up many GPU nodes with few pods each, this can lead to subnet IP exhaustion even though actual IP utilization is low.
 
-To mitigate this, tune the `WARM_IP_TARGET`, `MINIMUM_IP_TARGET`, and `WARM_ENI_TARGET` variables to match your actual pod density. More info at https://github.com/aws/amazon-vpc-cni-k8s/blob/master/docs/eni-and-ip-target.md[VPC CNI’s ENI and IP target settings].
+To mitigate this, tune the `WARM_IP_TARGET`, `MINIMUM_IP_TARGET`, and `WARM_ENI_TARGET` variables to match your actual pod density. More info at https://github.com/aws/amazon-vpc-cni-k8s/blob/master/docs/eni-and-ip-target.md[VPC CNI's ENI and IP target settings].
 
 For a full guide on optimizing IP consumption, see https://docs.aws.amazon.com/eks/latest/best-practices/ip-opt.html[Optimizing IP Address Utilization].
+
+== Consider Dedicated Network Interfaces for Higher Bandwidth AI/ML Workloads
+
+By default, pods share ENIs with other pods on the same node. For AI/ML workloads that need predictable, high-bandwidth networking — such as distributed training, high-throughput inference, or data-intensive pipelines — you can assign a dedicated network interface to a pod.
+
+The https://github.com/aws/amazon-vpc-cni-k8s#enable_pod_eni-v170[Pod ENI] feature allocates a dedicated Elastic Network Interface directly to a pod via the `vpc.amazonaws.com/pod-eni` extended resource. Instead of sharing an ENI (and its bandwidth) with other pods on the node, the pod gets a 1:1 relationship with its own network interface on a dedicated network card. This eliminates noisy-neighbor effects where other pods on the same node compete for the same ENI's bandwidth and packet-per-second capacity.
+
+NOTE: Pod ENI is the underlying mechanism for https://docs.aws.amazon.com/eks/latest/userguide/security-groups-for-pods.html[Security Groups for Pods], but it can be used independently for bandwidth isolation without applying per-pod security groups.
+
+More information on how to enable this feature with Karpenter https://karpenter.sh/docs/concepts/scheduling/#pod-eni-resources-security-groups-for-pods[here].
